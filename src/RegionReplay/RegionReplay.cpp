@@ -41,7 +41,7 @@
 #include <set>
 #include "RegionReplay.h"
 
-#if LLVM_VERSION_MINOR == 5
+#if LLVM_VERSION_MINOR == 5 || LLVM_VERSION_MAJOR > 3
 #include "llvm/IR/InstIterator.h"
 #else
 #include "llvm/Support/InstIterator.h"
@@ -103,14 +103,14 @@ std::vector<Value *> createLoadFunctionParameters(Module *mod,
                          /*Linkage=*/GlobalValue::PrivateLinkage,
                          /*Initializer=*/0, // has initializer, specified below
                          /*Name=*/".str");
-  gvar_array__str->setAlignment(1);
+  gvar_array__str->setAlignment(llvm::MaybeAlign(1));
   ConstantInt *const_int32_10 =
       ConstantInt::get(mod->getContext(), APInt(32, StringRef("0"), 10));
   std::vector<Constant *> const_ptr_11_indices;
   const_ptr_11_indices.push_back(const_int32_10);
   const_ptr_11_indices.push_back(const_int32_10);
   Constant *const_ptr_11 =
-      ConstantExpr::getGetElementPtr(gvar_array__str, const_ptr_11_indices);
+      ConstantExpr::getGetElementPtr(nullptr, gvar_array__str, const_ptr_11_indices);
   // Global Variable Definitions
   gvar_array__str->setInitializer(param_name);
 
@@ -129,7 +129,7 @@ std::vector<Value *> createLoadFunctionParameters(Module *mod,
       ConstantInt::get(mod->getContext(), APInt(32, nbArgs, 10));
   CastInst *int64_0 = new ZExtInst(
       const_int_nbArgs, IntegerType::get(mod->getContext(), 64), "", B);
-  AllocaInst *ptr_vla = new AllocaInst(PointerTy_4, int64_0, "vla", B);
+  AllocaInst *ptr_vla = new AllocaInst(PointerTy_4, 0, int64_0, "vla", B);
 
   // Push loop name + invocation to load + number of params + adresses array to
   // load params
@@ -167,10 +167,10 @@ std::vector<Value *> createLoopParameters(Function *currFunc, Module *mod,
     ConstantInt *const_int64_35 =
         ConstantInt::get(mod->getContext(), APInt(32, i, 10));
     GetElementPtrInst *ptr_arrayidx = GetElementPtrInst::Create(
-        ptr_vla, const_int64_35, "arrayidx", label_entry);
+        nullptr, ptr_vla, const_int64_35, "arrayidx", label_entry);
     LoadInst *ptr_69 =
         new LoadInst(ptr_arrayidx, "", false, label_entry); // get args[i]
-    DEBUG(dbgs() << "Casting " << *ptr_69->getType() << " to "
+    LLVM_DEBUG(dbgs() << "Casting " << *ptr_69->getType() << " to "
                  << *args->getType() << "\n");
     if (args->getType()->isPointerTy()) {
       ptr = new BitCastInst(ptr_69, args->getType(), "", label_entry); // cast
@@ -179,11 +179,11 @@ std::vector<Value *> createLoopParameters(Function *currFunc, Module *mod,
       Type *elementType = pointerType->getElementType();
       if (!elementType->isArrayTy() && !elementType->isStructTy()) {
         AllocaInst *ptr_a_addr =
-            new AllocaInst(args->getType(), "a", label_entry);
+            new AllocaInst(args->getType(), 0, "a", label_entry);
         AllocaInst *ptr_tmp = new AllocaInst(
-            args->getType()->getPointerElementType(), "b", label_entry);
+            args->getType()->getPointerElementType(), 0, "b", label_entry);
         AllocaInst *ptr_tmp2 = new AllocaInst(
-            args->getType()->getPointerElementType(), "c", label_entry);
+            args->getType()->getPointerElementType(), 0, "c", label_entry);
         // Store ptr adress
         new StoreInst(ptr, ptr_a_addr, false, label_entry);
         LoadInst *ptr_5 = new LoadInst(ptr_a_addr, "", false, label_entry);

@@ -43,7 +43,7 @@
 #include <set>
 #include "RegionReplay.h"
 
-#if LLVM_VERSION_MINOR == 5
+#if LLVM_VERSION_MINOR == 5 || LLVM_VERSION_MAJOR > 3
 #include "llvm/IR/InstIterator.h"
 #else
 #include "llvm/Support/InstIterator.h"
@@ -71,8 +71,13 @@ struct LoopRegionReplay : public FunctionPass {
   bool visitLoop(Loop *L, Module *mod);
 
   virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+#if LLVM_VERSION_MAJOR > 3
+    AU.addRequired<LoopInfoWrapperPass>();
+    AU.addPreserved<LoopInfoWrapperPass>();
+#else
     AU.addRequired<LoopInfo>();
     AU.addPreserved<LoopInfo>();
+#endif
   }
 };
 }
@@ -106,10 +111,14 @@ bool LoopRegionReplay::runOnFunction(Function &F) {
       Function *mainFunction = Function::Create(
           FuncTy_8, GlobalValue::ExternalLinkage, funcName, mod);
       std::vector<Value *> void_16_params;
-      CallInst::Create(mainFunction, "", Main->begin()->begin());
+      CallInst::Create(mainFunction, "", &*Main->begin()->begin());
     }
   }
+#if LLVM_VERSION_MAJOR > 3
+  LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
+#else
   LoopInfo &LI = getAnalysis<LoopInfo>();
+#endif
   // Get all loops int the current function and visit them
   std::vector<Loop *> SubLoops(LI.begin(), LI.end());
   for (unsigned i = 0, e = SubLoops.size(); i != e; ++i)

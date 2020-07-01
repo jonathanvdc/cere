@@ -44,7 +44,7 @@
 #include <set>
 #include "RegionReplay.h"
 
-#if LLVM_VERSION_MINOR == 5
+#if LLVM_VERSION_MINOR == 5 || LLVM_VERSION_MAJOR > 3
 #include "llvm/IR/InstIterator.h"
 #else
 #include "llvm/Support/InstIterator.h"
@@ -72,8 +72,13 @@ struct OmpRegionReplay : public FunctionPass {
   bool visitLoop(Loop *L, Module *mod);
 
   virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+#if LLVM_VERSION_MAJOR > 3
+    AU.addRequired<LoopInfoWrapperPass>();
+    AU.addPreserved<LoopInfoWrapperPass>();
+#else
     AU.addRequired<LoopInfo>();
     AU.addPreserved<LoopInfo>();
+#endif
   }
 };
 }
@@ -108,7 +113,7 @@ bool OmpRegionReplay::runOnFunction(Function &F) {
       Function *mainFunction = Function::Create(
           FuncTy_8, GlobalValue::ExternalLinkage, funcName, mod);
       std::vector<Value *> void_16_params;
-      CallInst::Create(mainFunction, "", Main->begin()->begin());
+      CallInst::Create(mainFunction, "", &*Main->begin()->begin());
     }
   }
 
