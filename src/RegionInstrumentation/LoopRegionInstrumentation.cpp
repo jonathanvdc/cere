@@ -41,12 +41,14 @@
 #include "RegionInstrumentation.h"
 
 #undef LLVM_BINDIR
-#include "config.h"
-#if LLVM_VERSION_MINOR == 5
+#if LLVM_VERSION_MINOR == 5 || LLVM_VERSION_MAJOR > 3
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/DebugInfo.h"
 #else
 #include "llvm/DebugInfo.h"
+#endif
+#if LLVM_VERSION_MAJOR > 3
+#include "llvm/Transforms/Utils.h"
 #endif
 
 using namespace llvm;
@@ -115,9 +117,14 @@ struct LoopRegionInstrumentation : public FunctionPass {
 
   virtual void getAnalysisUsage(AnalysisUsage &AU) const {
     AU.addRequiredID(BreakCriticalEdgesID);
+#if LLVM_VERSION_MAJOR > 3
+    AU.addRequired<LoopInfoWrapperPass>();
+    AU.addPreserved<LoopInfoWrapperPass>();
+#else
     AU.addRequired<LoopInfo>();
     AU.addPreserved<LoopInfo>();
-#if LLVM_VERSION_MINOR == 5
+#endif
+#if LLVM_VERSION_MINOR == 5 || LLVM_VERSION_MAJOR > 3
     AU.addRequired<DominatorTreeWrapperPass>();
 #else
     AU.addRequired<DominatorTree>();
@@ -143,8 +150,13 @@ LoopRegionInstrumentation::createFunctionName(Loop *L, Function *oldFunction) {
   BasicBlock *firstBB = L->getBlocks()[0];
 
   if (MDNode *firstN = firstBB->front().getMetadata("dbg")) {
+#if LLVM_VERSION_MAJOR > 3
+    DILocation &firstLoc = *cast<DILocation>(firstN);
+    oss << firstLoc.getLine();
+#else
     DILocation firstLoc(firstN);
     oss << firstLoc.getLineNumber();
+#endif
     std::string firstLine = oss.str();
     std::string Original_location = firstLoc.getFilename().str();
     std::string File = module_name;
@@ -166,7 +178,11 @@ bool LoopRegionInstrumentation::runOnFunction(Function &F) {
   Module *mod = F.getParent();
   // If we want to instrument a region, visit every loops.
   if (!MeasureAppli) {
+#if LLVM_VERSION_MAJOR > 3
+    LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
+#else
     LoopInfo &LI = getAnalysis<LoopInfo>();
+#endif
     std::vector<Loop *> SubLoops(LI.begin(), LI.end());
     for (unsigned i = 0, e = SubLoops.size(); i != e; ++i)
       visitLoop(SubLoops[i], mod);
@@ -183,7 +199,7 @@ bool LoopRegionInstrumentation::visitLoop(Loop *L, Module *mod) {
   if (L->getLoopDepth() > 1)
     return false;
   if (!L->isLoopSimplifyForm()) {
-    DEBUG(dbgs() << "Loop found, but not in simple form...\n");
+    LLVM_DEBUG(dbgs() << "Loop found, but not in simple form...\n");
     return false;
   }
 
@@ -232,7 +248,7 @@ bool LoopRegionInstrumentation::visitLoop(Loop *L, Module *mod) {
   if (PredBB == NULL || exitblocks.size() == 0) {
     errs() << "Can't find Prdecessor or successor basick block for region "
            << RegionName << "\n";
-    DEBUG(dbgs() << "Can't find predecessor or successor basick block for \
+    LLVM_DEBUG(dbgs() << "Can't find predecessor or successor basick block for \
                     region " << RegionName << "\n");
     return false;
   }
@@ -248,7 +264,7 @@ bool LoopRegionInstrumentation::visitLoop(Loop *L, Module *mod) {
     // Load the invocation counter
     LoadInst *int32_0 =
         new LoadInst(gvar_int32_count, "", false, &PredBB->back());
-    int32_0->setAlignment(4);
+    int32_0->setAlignment(llvm::MaybeAlign(4));
     // Increments it
     ConstantInt *const_int32_1 =
         ConstantInt::get(mod->getContext(), APInt(32, StringRef("1"), 10));
@@ -257,11 +273,11 @@ bool LoopRegionInstrumentation::visitLoop(Loop *L, Module *mod) {
     // Save the value
     StoreInst *void_0 =
         new StoreInst(int32_inc, gvar_int32_count, false, &PredBB->back());
-    void_0->setAlignment(4);
+    void_0->setAlignment(llvm::MaybeAlign(4));
     // Load the updated invocation counter
     LoadInst *int32_1 =
         new LoadInst(gvar_int32_count, "", false, &PredBB->back());
-    int32_1->setAlignment(4);
+    int32_1->setAlignment(llvm::MaybeAlign(4));
 
     // Create function parameters
     funcParameter = createFunctionParameters(mod, newFunctionName, Mode,

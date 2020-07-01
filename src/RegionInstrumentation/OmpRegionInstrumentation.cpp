@@ -41,14 +41,16 @@
 #include "RegionInstrumentation.h"
 
 #undef LLVM_BINDIR
-#include "config.h"
-#if LLVM_VERSION_MINOR == 5
+#if LLVM_VERSION_MINOR == 5 || LLVM_VERSION_MAJOR > 3
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/DebugInfo.h"
 #else
 #include "llvm/DebugInfo.h"
 #include "llvm/Support/InstIterator.h"
+#endif
+#if LLVM_VERSION_MAJOR > 3
+#include "llvm/Transforms/Utils.h"
 #endif
 
 using namespace llvm;
@@ -121,9 +123,14 @@ struct OmpRegionInstrumentation : public FunctionPass {
 
   virtual void getAnalysisUsage(AnalysisUsage &AU) const {
     AU.addRequiredID(BreakCriticalEdgesID);
+#if LLVM_VERSION_MAJOR > 3
+    AU.addRequired<LoopInfoWrapperPass>();
+    AU.addPreserved<LoopInfoWrapperPass>();
+#else
     AU.addRequired<LoopInfo>();
     AU.addPreserved<LoopInfo>();
-#if LLVM_VERSION_MINOR == 5
+#endif
+#if LLVM_VERSION_MINOR == 5 || LLVM_VERSION_MAJOR > 3
     AU.addRequired<DominatorTreeWrapperPass>();
 #else
     AU.addRequired<DominatorTree>();
@@ -169,8 +176,13 @@ std::string createFunctionName(Function *oldFunction, CallInst *callInst) {
   // If the function containing the loop does not have debug
   // information, we can't outline the loop.
   if (MDNode *firstN = callInst->getMetadata("dbg")) {
+#if LLVM_VERSION_MAJOR > 3
+    DILocation &firstLoc = *cast<DILocation>(firstN);
+    oss << firstLoc.getLine();
+#else
     DILocation firstLoc(firstN);
     oss << firstLoc.getLineNumber();
+#endif
     std::string firstLine = oss.str();
     std::string Original_location = firstLoc.getFilename().str();
     std::string path = firstLoc.getDirectory();
@@ -283,7 +295,7 @@ LoadInst *OmpRegionInstrumentation::insertMarkerInvocation(
             // Load the invocation counter
             LoadInst *int32_0 =
                 new LoadInst(gvar_int32_count, "", false, (&*I));
-            int32_0->setAlignment(4);
+            int32_0->setAlignment(llvm::MaybeAlign(4));
             // Increments it
 
             ConstantInt *const_int32_1 = ConstantInt::get(
@@ -293,10 +305,10 @@ LoadInst *OmpRegionInstrumentation::insertMarkerInvocation(
             // Save the value
             StoreInst *void_0 =
                 new StoreInst(int32_inc, gvar_int32_count, false, (&*I));
-            void_0->setAlignment(4);
+            void_0->setAlignment(llvm::MaybeAlign(4));
             // Load the updated invocation counter
             int32_1 = new LoadInst(gvar_int32_count, "", false, (&*I));
-            int32_1->setAlignment(4);
+            int32_1->setAlignment(llvm::MaybeAlign(4));
           }
           funcParameter = createFunctionParameters(mod, newFunctionName, Mode,
                                                    RequestedInvoc, int32_1);

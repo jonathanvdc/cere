@@ -38,8 +38,7 @@
 
 #include "RegionInstrumentation.h"
 #undef LLVM_BINDIR
-#include "config.h"
-#if LLVM_VERSION_MINOR == 5
+#if LLVM_VERSION_MINOR == 5 || LLVM_VERSION_MAJOR > 3
 #include "llvm/IR/DebugInfo.h"
 #else
 #include "llvm/DebugInfo.h"
@@ -171,7 +170,7 @@ GlobalVariable *create_invocation_counter(Module *mod) {
                          /*Linkage=*/GlobalValue::InternalLinkage,
                          /*Initializer=*/0,
                          /*Name=*/"cere_invocation_counter");
-  gvar_int32_count->setAlignment(4);
+  gvar_int32_count->setAlignment(llvm::MaybeAlign(4));
   ConstantInt *const_int32 =
       ConstantInt::get(mod->getContext(), APInt(32, StringRef("0"), 10));
   gvar_int32_count->setInitializer(const_int32);
@@ -192,7 +191,7 @@ std::vector<Value *> createInitParameters(Module *mod, std::string fileN) {
                          /*Linkage=*/GlobalValue::PrivateLinkage,
                          /*Initializer=*/0,
                          /*Name=*/".str");
-  gvar_array__str->setAlignment(1);
+  gvar_array__str->setAlignment(llvm::MaybeAlign(1));
 
   ConstantInt *const_int32_0 =
       ConstantInt::get(mod->getContext(), APInt(32, StringRef("0"), 10));
@@ -200,7 +199,7 @@ std::vector<Value *> createInitParameters(Module *mod, std::string fileN) {
   const_ptr_indices.push_back(const_int32_0);
   const_ptr_indices.push_back(const_int32_0);
   Constant *const_ptr_0 =
-      ConstantExpr::getGetElementPtr(gvar_array__str, const_ptr_indices);
+      ConstantExpr::getGetElementPtr(nullptr, gvar_array__str, const_ptr_indices);
 
   // Global Variable Definitions
   gvar_array__str->setInitializer(param_name);
@@ -228,7 +227,7 @@ std::vector<Value *> createFunctionParameters(Module *mod,
                          /*Linkage=*/GlobalValue::PrivateLinkage,
                          /*Initializer=*/0,
                          /*Name=*/".str");
-  gvar_array__str->setAlignment(1);
+  gvar_array__str->setAlignment(llvm::MaybeAlign(1));
 
   ConstantInt *const_int32_0 =
       ConstantInt::get(mod->getContext(), APInt(32, StringRef("0"), 10));
@@ -236,7 +235,7 @@ std::vector<Value *> createFunctionParameters(Module *mod,
   const_ptr_indices.push_back(const_int32_0);
   const_ptr_indices.push_back(const_int32_0);
   Constant *const_ptr_0 =
-      ConstantExpr::getGetElementPtr(gvar_array__str, const_ptr_indices);
+      ConstantExpr::getGetElementPtr(nullptr, gvar_array__str, const_ptr_indices);
 
   // Set vivo/vitro boolean
   ConstantInt *const_int1;
@@ -300,7 +299,7 @@ void prepareInstrumentation(Function &F, std::string fileN, bool MeasureA,
     std::vector<BasicBlock *> ReturningBlocks;
     for (Function::iterator I = Main->begin(), E = Main->end(); I != E; ++I) {
       if (isa<ReturnInst>(I->getTerminator()))
-        ReturningBlocks.push_back(I);
+        ReturningBlocks.push_back(&*I);
     }
 
     // If we want to measure the whole application cycle, insert start
@@ -337,7 +336,7 @@ void prepareInstrumentation(Function &F, std::string fileN, bool MeasureA,
           FuncTy_Init, GlobalValue::ExternalLinkage, "cere_markerInit", mod);
       CallInst::Create(initFunction, createInitParameters(mod, fileN), "",
                        &firstBB->front());
-      DEBUG(dbgs() << "Init successfuly inserted in main function\n");
+      LLVM_DEBUG(dbgs() << "Init successfuly inserted in main function\n");
     }
     Function *closeFunction = mod->getFunction("cere_markerClose");
     if (!closeFunction) {
@@ -345,7 +344,7 @@ void prepareInstrumentation(Function &F, std::string fileN, bool MeasureA,
           FuncTy_Close, GlobalValue::ExternalLinkage, "cere_markerClose", mod);
       // Register close marker with atexit
       CallInst::Create(func_atexit, closeFunction, "", &firstBB->front());
-      DEBUG(dbgs() << "Close successfuly inserted in main function\n");
+      LLVM_DEBUG(dbgs() << "Close successfuly inserted in main function\n");
     }
   }
 }
