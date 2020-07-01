@@ -31,8 +31,12 @@
 #include "llvm/Transforms/Scalar.h"
 #include "RegionExtractor.h"
 
-#if LLVM_VERSION_MINOR == 5
+#if LLVM_VERSION_MINOR == 5 || LLVM_VERSION_MAJOR > 3
 #include "llvm/IR/Dominators.h"
+#endif
+
+#if LLVM_VERSION_MAJOR > 3
+#include "llvm/Transforms/Utils.h"
 #endif
 
 using namespace llvm;
@@ -64,7 +68,7 @@ struct LoopRegionOutliner : public LoopPass {
   virtual void getAnalysisUsage(AnalysisUsage &AU) const {
     AU.addRequiredID(BreakCriticalEdgesID);
     AU.addRequiredID(LoopSimplifyID);
-#if LLVM_VERSION_MINOR == 5
+#if LLVM_VERSION_MINOR == 5 || LLVM_VERSION_MAJOR > 3
     AU.addRequired<DominatorTreeWrapperPass>();
 #else
     AU.addRequired<DominatorTree>();
@@ -85,7 +89,7 @@ bool LoopRegionOutliner::runOnLoop(Loop *L, LPPassManager &LPM) {
   // If LoopSimplify form is not available, stay out of trouble.
   if (!L->isLoopSimplifyForm())
     return false;
-#if LLVM_VERSION_MINOR == 5
+#if LLVM_VERSION_MINOR == 5 || LLVM_VERSION_MAJOR > 3
     DominatorTree &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
 #else
     DominatorTree &DT = getAnalysis<DominatorTree>();
@@ -113,7 +117,11 @@ bool LoopRegionOutliner::runOnLoop(Loop *L, LPPassManager &LPM) {
       Changed = true;
       // After extraction, the loop is replaced by a function call, so
       // we shouldn't try to run any more loop passes on it.
+#if LLVM_VERSION_MAJOR > 3
+      LPM.markLoopAsDeleted(*L);
+#else
       LPM.deleteLoopFromQueue(L);
+#endif
     }
     ++NumExtracted;
   }
