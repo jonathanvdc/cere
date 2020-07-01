@@ -40,9 +40,13 @@
 #include <sstream>
 #include <fstream>
 
+#define DEBUG(x)
+
 #undef LLVM_BINDIR
-#include "config.h"
-#if LLVM_VERSION_MINOR == 5
+// #include "config.h"
+#if LLVM_VERSION_MAJOR >= 9
+#include "llvm/IR/DebugInfo.h"
+#elif LLVM_VERSION_MINOR == 5
 #define DEBUG_TYPE "code-extractor"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/StringExtras.h"
@@ -119,7 +123,7 @@ static SetVector<BasicBlock *> buildExtractionBlockSet(IteratorT BBBegin,
   }
 
 #ifndef NDEBUG
-#if LLVM_VERSION_MINOR == 5
+#if LLVM_VERSION_MAJOR >= 4 || (LLVM_VERSION_MAJOR == 3 && LLVM_VERSION_MINOR >= 5)
   for (SetVector<BasicBlock *>::iterator I = std::next(Result.begin()),
 #else
   for (SetVector<BasicBlock *>::iterator I = llvm::next(Result.begin()),
@@ -231,7 +235,7 @@ void RegionExtractor::findInputsOutputs(ValueSet &Inputs,
            UI != UE; ++UI)
         if (!definedInRegion(Blocks, *UI)) {
 #endif
-          Outputs.insert(II);
+          Outputs.insert(&*II);
           break;
         }
     }
@@ -267,8 +271,8 @@ void RegionExtractor::severSplitPHINodes(BasicBlock *&Header) {
   // containing PHI nodes merging values from outside of the region, and a
   // second that contains all of the code for the block and merges back any
   // incoming values from inside of the region.
-  BasicBlock::iterator AfterPHIs = Header->getFirstNonPHI();
-  BasicBlock *NewBB = Header->splitBasicBlock(AfterPHIs,
+  auto AfterPHINode = Header->getFirstNonPHI();
+  BasicBlock *NewBB = Header->splitBasicBlock(AfterPHINode,
                                               Header->getName()+".ce");
 
   // We only want to code extract the second block now, and it becomes the new
@@ -291,18 +295,18 @@ void RegionExtractor::severSplitPHINodes(BasicBlock *&Header) {
     // changing them to branch to NewBB instead.
     for (unsigned i = 0, e = PN->getNumIncomingValues(); i != e; ++i)
       if (Blocks.count(PN->getIncomingBlock(i))) {
-        TerminatorInst *TI = PN->getIncomingBlock(i)->getTerminator();
+        auto TI = PN->getIncomingBlock(i)->getTerminator();
         TI->replaceUsesOfWith(OldPred, NewBB);
       }
 
     // Okay, everything within the region is now branching to the right block, we
     // just have to update the PHI nodes now, inserting PHI nodes into NewBB.
-    for (AfterPHIs = OldPred->begin(); isa<PHINode>(AfterPHIs); ++AfterPHIs) {
-      PHINode *PN = cast<PHINode>(AfterPHIs);
+    for (auto AfterPHIs = OldPred->begin(); isa<PHINode>(&*AfterPHIs); ++AfterPHIs) {
+      PHINode *PN = cast<PHINode>(&*AfterPHIs);
       // Create a new PHI node in the new region, which has an incoming value
       // from OldPred of PN.
       PHINode *NewPN = PHINode::Create(PN->getType(), 1 + NumPredsFromRegion,
-                                       PN->getName()+".ce", NewBB->begin());
+                                       PN->getName()+".ce", &*NewBB->begin());
       NewPN->addIncoming(PN, OldPred);
 
       // Loop over all of the incoming value in PN, moving them to NewPN if they
@@ -456,8 +460,8 @@ std::string RegionExtractor::createFunctionName(Function *oldFunction,
   // If the function containing the loop does not have debug
   // information, we can't outline the loop.
   if (MDNode *firstN = firstBB->front().getMetadata("dbg")) {
-    DILocation firstLoc(firstN);
-    oss << firstLoc.getLineNumber();
+    DILocation &firstLoc = *cast<DILocation>(firstN);
+    oss << firstLoc.getLine();
     std::string firstLine = oss.str();
     std::string Original_location = firstLoc.getFilename().str();
     std::string path = firstLoc.getDirectory();
@@ -565,17 +569,13 @@ Function *RegionExtractor::constructFunction(
       Value *Idx[2];
       Idx[0] = Constant::getNullValue(Type::getInt32Ty(header->getContext()));
       Idx[1] = ConstantInt::get(Type::getInt32Ty(header->getContext()), i);
-      TerminatorInst *TI = newFunction->begin()->getTerminator();
+      auto TI = newFunction->begin()->getTerminator();
       GetElementPtrInst *GEP =
-        GetElementPtrInst::Create(AI, Idx, "gep_" + inputs[i]->getName(), TI);
+        GetElementPtrInst::Create(AI->getType()->getPointerElementType(), AI, Idx, "gep_" + inputs[i]->getName(), TI);
       RewriteVal = new LoadInst(GEP, "loadgep_" + inputs[i]->getName(), TI);
     } else
       RewriteVal = AI++;
-#if LLVM_VERSION_MINOR == 5
     std::vector<User*> Users(inputs[i]->user_begin(), inputs[i]->user_end());
-#else
-    std::vector<User*> Users(inputs[i]->use_begin(), inputs[i]->use_end());
-#endif
     for (std::vector<User*>::iterator use = Users.begin(), useE = Users.end();
          use != useE; ++use)
       if (Instruction* inst = dyn_cast<Instruction>(*use))
@@ -584,9 +584,6 @@ Function *RegionExtractor::constructFunction(
   }
 
   // Creates Attribute Noalias
-  AttributeSet newParamAttr = AttributeSet().addAttribute(
-      newFunction->getContext(), 0, Attribute::NoAlias);
-
   AI = newFunction->arg_begin();
   for (unsigned i = 0, e = inputs.size() + outputs.size(); i != e; ++i, ++AI) {
     if (AI->getType()->isPointerTy()) {
@@ -594,7 +591,7 @@ Function *RegionExtractor::constructFunction(
       Type *elementType = pointerType->getElementType();
       // Add no alias if it's not an array or a structure
       if (!elementType->isArrayTy() && !elementType->isStructTy()) {
-        AI->addAttr(newParamAttr);
+        AI->addAttr(Attribute::NoAlias);
       }
     }
   }
@@ -610,18 +607,21 @@ Function *RegionExtractor::constructFunction(
   // Rewrite branches to basic blocks outside of the loop to new dummy blocks
   // within the new function. This must be done before we lose track of which
   // blocks were originally in the code region.
-#if LLVM_VERSION_MINOR == 5
   std::vector<User*> Users(header->user_begin(), header->user_end());
-#else
-  std::vector<User*> Users(header->use_begin(), header->use_end());
-#endif
   for (unsigned i = 0, e = Users.size(); i != e; ++i)
+  {
     // The BasicBlock which contains the branch is not in the region
     // modify the branch target to a new block
-    if (TerminatorInst *TI = dyn_cast<TerminatorInst>(Users[i]))
-      if (!Blocks.count(TI->getParent()) &&
+    if (auto *TI = dyn_cast<Instruction>(Users[i]))
+    {
+      if (TI->isTerminator() &&
+          !Blocks.count(TI->getParent()) &&
           TI->getParent()->getParent() == oldFunction)
+      {
         TI->replaceUsesOfWith(header, newHeader);
+      }
+    }
+  }
 
   return newFunction;
 }
@@ -645,7 +645,7 @@ static BasicBlock *FindPhiPredForUseInBlock(Value *Used, BasicBlock *BB) {
        UI != UE; ++UI) {
     PHINode *P = dyn_cast<PHINode>(*UI);
     if (P && P->getParent() == BB)
-      return P->getIncomingBlock(UI);
+      return P->getIncomingBlock(*UI);
   }
 
   return 0;
@@ -668,29 +668,38 @@ void RegionExtractor::removeWrongMetadata(Function *newFunction) {
         if (Function *F = CI->getCalledFunction()) {
           for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i) {
             // Get Metadata information
-            if (MDNode *MD = dyn_cast_or_null<MDNode>(I->getOperand(i))) {
-              for (unsigned j = 0, k = MD->getNumOperands(); j != k; ++j) {
-                Function *ActualF = 0;
-                Value *Op = MD->getOperand(j);
-                if (!Op)
-                  continue;
-                if (isa<Constant>(Op) || isa<MDString>(Op))
-                  continue;
+            if (MetadataAsValue *MetadataAsVal = dyn_cast_or_null<MetadataAsValue>(I->getOperand(i))) {
+              if (auto MD = dyn_cast<MDNode>(MetadataAsVal->getMetadata())) {
+                for (unsigned j = 0, k = MD->getNumOperands(); j != k; ++j) {
+                  Function *ActualF = 0;
+                  auto &Op = MD->getOperand(j);
+                  if (!Op)
+                    continue;
+                  if (isa<MDString>(Op))
+                    continue;
 
-                // If this was an instruction, bb, or argument, verify that it
-                // is in the function that we expect.
-                if (Instruction *J = dyn_cast<Instruction>(Op))
-                  ActualF = J->getParent()->getParent();
-                else if (BasicBlock *BB = dyn_cast<BasicBlock>(Op))
-                  ActualF = BB->getParent();
-                else if (Argument *A = dyn_cast<Argument>(Op))
-                  ActualF = A->getParent();
-                else
-                  continue;
+                  // If this was an instruction, bb, or argument, verify that it
+                  // is in the function that we expect.
+                  auto ValAsMeta = dyn_cast<ValueAsMetadata>(Op);
+                  if (ValAsMeta && !isa<Constant>(ValAsMeta->getValue())) {
+                    if (Instruction *J = dyn_cast<Instruction>(ValAsMeta->getValue()))
+                      ActualF = J->getParent()->getParent();
+                    else if (BasicBlock *BB = dyn_cast<BasicBlock>(ValAsMeta->getValue()))
+                      ActualF = BB->getParent();
+                    else if (Argument *A = dyn_cast<Argument>(ValAsMeta->getValue()))
+                      ActualF = A->getParent();
+                    else
+                      continue;
+                  }
+                  else {
+                    continue;
+                  }
+                  
 
-                if (ActualF != newFunction) {
-                  // Keep this instruction for delation
-                  InstToDel.push_back(CI);
+                  if (ActualF != newFunction) {
+                    // Keep this instruction for delation
+                    InstToDel.push_back(CI);
+                  }
                 }
               }
             }
@@ -737,7 +746,7 @@ emitCallAndSwitchStatement(Function *newFunction, BasicBlock *codeReplacer,
 #else
       AllocaInst *alloca =
         new AllocaInst((*i)->getType(), 0, (*i)->getName()+".loc",
-                       codeReplacer->getParent()->begin()->begin());
+                       &*codeReplacer->getParent()->begin()->begin());
 #endif
       ReloadOutputs.push_back(alloca);
       params.push_back(alloca);
@@ -757,15 +766,9 @@ emitCallAndSwitchStatement(Function *newFunction, BasicBlock *codeReplacer,
 
     // Allocate a struct at the beginning of this function
     Type *StructArgTy = StructType::get(newFunction->getContext(), ArgTypes);
-#if LLVM_VERSION_MINOR == 5
-    Struct =
-      new AllocaInst(StructArgTy, nullptr, "structArg",
-                     codeReplacer->getParent()->begin()->begin());
-#else
     Struct =
       new AllocaInst(StructArgTy, 0, "structArg",
-                     codeReplacer->getParent()->begin()->begin());
-#endif
+                     &*codeReplacer->getParent()->begin()->begin());
     params.push_back(Struct);
 
     for (unsigned i = 0, e = inputs.size(); i != e; ++i) {
@@ -773,7 +776,7 @@ emitCallAndSwitchStatement(Function *newFunction, BasicBlock *codeReplacer,
       Idx[0] = Constant::getNullValue(Type::getInt32Ty(Context));
       Idx[1] = ConstantInt::get(Type::getInt32Ty(Context), i);
       GetElementPtrInst *GEP =
-        GetElementPtrInst::Create(Struct, Idx,
+        GetElementPtrInst::Create(Struct->getAllocatedType(), Struct, Idx,
                                   "gep_" + StructValues[i]->getName());
       codeReplacer->getInstList().push_back(GEP);
       StoreInst *SI = new StoreInst(StructValues[i], GEP);
@@ -803,7 +806,7 @@ emitCallAndSwitchStatement(Function *newFunction, BasicBlock *codeReplacer,
       Idx[0] = Constant::getNullValue(Type::getInt32Ty(Context));
       Idx[1] = ConstantInt::get(Type::getInt32Ty(Context), FirstOut + i);
       GetElementPtrInst *GEP
-        = GetElementPtrInst::Create(Struct, Idx,
+        = GetElementPtrInst::Create(Struct->getAllocatedType(), Struct, Idx,
                                     "gep_reload_" + outputs[i]->getName());
       codeReplacer->getInstList().push_back(GEP);
       Output = GEP;
@@ -813,11 +816,7 @@ emitCallAndSwitchStatement(Function *newFunction, BasicBlock *codeReplacer,
     LoadInst *load = new LoadInst(Output, outputs[i]->getName()+".reload");
     Reloads.push_back(load);
     codeReplacer->getInstList().push_back(load);
-#if LLVM_VERSION_MINOR == 5
     std::vector<User*> Users(outputs[i]->user_begin(), outputs[i]->user_end());
-#else
-    std::vector<User*> Users(outputs[i]->use_begin(), outputs[i]->use_end());
-#endif
     for (unsigned u = 0, e = Users.size(); u != e; ++u) {
       Instruction *inst = cast<Instruction>(Users[u]);
       if (!Blocks.count(inst->getParent()))
@@ -840,7 +839,7 @@ emitCallAndSwitchStatement(Function *newFunction, BasicBlock *codeReplacer,
   unsigned switchVal = 0;
   for (SetVector<BasicBlock*>::const_iterator i = Blocks.begin(),
          e = Blocks.end(); i != e; ++i) {
-    TerminatorInst *TI = (*i)->getTerminator();
+    auto *TI = (*i)->getTerminator();
     for (unsigned i = 0, e = TI->getNumSuccessors(); i != e; ++i)
       if (!Blocks.count(TI->getSuccessor(i))) {
         BasicBlock *OldTarget = TI->getSuccessor(i);
@@ -925,7 +924,7 @@ emitCallAndSwitchStatement(Function *newFunction, BasicBlock *codeReplacer,
                 Idx[1] = ConstantInt::get(Type::getInt32Ty(Context),
                                           FirstOut+out);
                 GetElementPtrInst *GEP =
-                  GetElementPtrInst::Create(OAI, Idx,
+                  GetElementPtrInst::Create(OAI->getType()->getPointerElementType(), OAI, Idx,
                                             "gep_" + outputs[out]->getName(),
                                             NTRet);
                 new StoreInst(outputs[out], GEP, NTRet);
