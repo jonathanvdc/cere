@@ -41,7 +41,7 @@
 #include <set>
 #include "RegionDump.h"
 
-#if LLVM_VERSION_MINOR == 5
+#if LLVM_VERSION_MINOR == 5 || LLVM_VERSION_MAJOR > 3
 #include "llvm/IR/InstIterator.h"
 #else
 #include "llvm/Support/InstIterator.h"
@@ -92,7 +92,7 @@ Constant *createStringValue(Module *mod, std::string &s) {
                          /*Initializer=*/0, // has initializer, specified below
                          /*Name=*/".str");
 
-  gvar_array__str->setAlignment(1);
+  gvar_array__str->setAlignment(llvm::MaybeAlign(1));
   ConstantInt *const_int32_0 =
       ConstantInt::get(mod->getContext(), APInt(32, StringRef("0"), 10));
   std::vector<Constant *> const_ptr_0_indices;
@@ -100,7 +100,7 @@ Constant *createStringValue(Module *mod, std::string &s) {
   const_ptr_0_indices.push_back(const_int32_0);
   gvar_array__str->setInitializer(const_array_0);
 
-  return ConstantExpr::getGetElementPtr(gvar_array__str, const_ptr_0_indices);
+  return ConstantExpr::getGetElementPtr(nullptr, gvar_array__str, const_ptr_0_indices);
 }
 
 /// Creates parameters for the dump function
@@ -119,7 +119,7 @@ std::vector<Value *> createDumpFunctionParameters(Module *mod,
     // If argument is a value get its address
     if (args->getType()->isPointerTy() == false) {
       AllocaInst *ptr_args =
-          new AllocaInst(args->getType(), args->getName(), &PredBB->back());
+          new AllocaInst(args->getType(), 0, args->getName(), &PredBB->back());
       new StoreInst(args, ptr_args, false, &PredBB->back());
       // If this argument does not have a name, create one
       if ((ptr_args->getName().str()).empty()) {

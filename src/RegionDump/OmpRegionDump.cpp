@@ -44,7 +44,7 @@
 #include <set>
 #include "RegionDump.h"
 
-#if LLVM_VERSION_MINOR == 5
+#if LLVM_VERSION_MINOR == 5 || LLVM_VERSION_MAJOR > 3
 #include "llvm/IR/InstIterator.h"
 #else
 #include "llvm/Support/InstIterator.h"
@@ -87,8 +87,13 @@ struct OmpRegionDump : public FunctionPass {
   virtual bool runOnFunction(Function &F);
 
   virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+#if LLVM_VERSION_MAJOR > 3
+    AU.addRequired<LoopInfoWrapperPass>();
+    AU.addPreserved<LoopInfoWrapperPass>();
+#else
     AU.addRequired<LoopInfo>();
     AU.addPreserved<LoopInfo>();
+#endif
   }
 };
 }
@@ -139,7 +144,7 @@ bool OmpRegionDump::runOnFunction(Function &F) {
       std::vector<Value *> void_16_params;
       void_16_params.push_back(const_int1_11);
       CallInst::Create(mainFunction, void_16_params, "",
-                       Main->begin()->begin());
+                       &*Main->begin()->begin());
     }
   }
 

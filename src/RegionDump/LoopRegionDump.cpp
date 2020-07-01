@@ -43,7 +43,7 @@
 #include <set>
 #include "RegionDump.h"
 
-#if LLVM_VERSION_MINOR == 5
+#if LLVM_VERSION_MINOR == 5 || LLVM_VERSION_MAJOR > 3
 #include "llvm/IR/InstIterator.h"
 #else
 #include "llvm/Support/InstIterator.h"
@@ -87,8 +87,13 @@ struct LoopRegionDump : public FunctionPass {
   bool visitLoop(Loop *L, Module *mod);
 
   virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+#if LLVM_VERSION_MAJOR > 3
+    AU.addRequired<LoopInfoWrapperPass>();
+    AU.addPreserved<LoopInfoWrapperPass>();
+#else
     AU.addRequired<LoopInfo>();
     AU.addPreserved<LoopInfo>();
+#endif
   }
 };
 }
@@ -130,10 +135,14 @@ bool LoopRegionDump::runOnFunction(Function &F) {
       std::vector<Value *> void_16_params;
       void_16_params.push_back(const_int1_11);
       CallInst::Create(mainFunction, void_16_params, "",
-                       Main->begin()->begin());
+                       &*Main->begin()->begin());
     }
   }
+#if LLVM_VERSION_MAJOR > 3
+  LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
+#else
   LoopInfo &LI = getAnalysis<LoopInfo>();
+#endif
   // Get all loops int the current function and visit them
   std::vector<Loop *> SubLoops(LI.begin(), LI.end());
   for (unsigned i = 0, e = SubLoops.size(); i != e; ++i)
