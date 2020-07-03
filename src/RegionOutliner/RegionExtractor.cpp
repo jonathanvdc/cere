@@ -37,6 +37,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include <unordered_set>
 #include <sstream>
 #include <fstream>
 
@@ -652,6 +653,51 @@ static BasicBlock *FindPhiPredForUseInBlock(Value *Used, BasicBlock *BB) {
 }
 #endif
 
+static bool isExternalFunctionLocalMetadata(
+  const Metadata *metadata,
+  Function *newFunction,
+  std::unordered_set<const Metadata *> &processed) {
+  if (auto ValAsMeta = dyn_cast<ValueAsMetadata>(metadata)) {
+    Function *ActualF = nullptr;
+    if (isa<Constant>(ValAsMeta->getValue())) {
+      return false;
+    }
+    else if (Instruction *J = dyn_cast<Instruction>(ValAsMeta->getValue())) {
+      ActualF = J->getParent()->getParent();
+    }
+    else if (BasicBlock *BB = dyn_cast<BasicBlock>(ValAsMeta->getValue())) {
+      ActualF = BB->getParent();
+    }
+    else if (Argument *A = dyn_cast<Argument>(ValAsMeta->getValue())) {
+      ActualF = A->getParent();
+    }
+    else {
+      return false;
+    }
+
+    return ActualF != newFunction;
+  }
+  else if (auto MD = dyn_cast<MDNode>(metadata)) {
+    for (unsigned j = 0, k = MD->getNumOperands(); j != k; ++j) {
+      auto &Op = MD->getOperand(j);
+      if (!Op || isa<MDString>(Op) || processed.count(Op)) {
+        continue;
+      }
+
+      processed.insert(Op);
+      if (isExternalFunctionLocalMetadata(Op, newFunction, processed)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static bool isExternalFunctionLocalMetadata(const Metadata *metadata, Function *newFunction) {
+  std::unordered_set<const Metadata *> processed;
+  return isExternalFunctionLocalMetadata(metadata, newFunction, processed);
+}
+
 /// Sometimes when outlining code, metadata refers to the original function
 /// and not to the extracted one. This function removes wrong metadata. This
 /// code is based on this example:
@@ -669,38 +715,8 @@ void RegionExtractor::removeWrongMetadata(Function *newFunction) {
           for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i) {
             // Get Metadata information
             if (MetadataAsValue *MetadataAsVal = dyn_cast_or_null<MetadataAsValue>(I->getOperand(i))) {
-              if (auto MD = dyn_cast<MDNode>(MetadataAsVal->getMetadata())) {
-                for (unsigned j = 0, k = MD->getNumOperands(); j != k; ++j) {
-                  Function *ActualF = 0;
-                  auto &Op = MD->getOperand(j);
-                  if (!Op)
-                    continue;
-                  if (isa<MDString>(Op))
-                    continue;
-
-                  // If this was an instruction, bb, or argument, verify that it
-                  // is in the function that we expect.
-                  auto ValAsMeta = dyn_cast<ValueAsMetadata>(Op);
-                  if (ValAsMeta && !isa<Constant>(ValAsMeta->getValue())) {
-                    if (Instruction *J = dyn_cast<Instruction>(ValAsMeta->getValue()))
-                      ActualF = J->getParent()->getParent();
-                    else if (BasicBlock *BB = dyn_cast<BasicBlock>(ValAsMeta->getValue()))
-                      ActualF = BB->getParent();
-                    else if (Argument *A = dyn_cast<Argument>(ValAsMeta->getValue()))
-                      ActualF = A->getParent();
-                    else
-                      continue;
-                  }
-                  else {
-                    continue;
-                  }
-                  
-
-                  if (ActualF != newFunction) {
-                    // Keep this instruction for delation
-                    InstToDel.push_back(CI);
-                  }
-                }
+              if (isExternalFunctionLocalMetadata(MetadataAsVal->getMetadata(), newFunction)) {
+                InstToDel.push_back(CI);
               }
             }
           }
