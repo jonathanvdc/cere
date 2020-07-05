@@ -43,6 +43,8 @@
 #include <set>
 #include "RegionReplay.h"
 
+#include <iostream>
+
 #if LLVM_VERSION_MINOR == 5 || LLVM_VERSION_MAJOR > 3
 #include "llvm/IR/InstIterator.h"
 #else
@@ -57,91 +59,78 @@ extern cl::opt<std::string> RegionName;
 extern cl::opt<int> Invocation;
 
 namespace {
-struct LoopRegionReplay : public FunctionPass {
+struct LoopRegionReplay : public ModulePass {
   static char ID;
   unsigned NumLoops;
   int InvocationToReplay;
   std::string RegionToReplay;
 
   explicit LoopRegionReplay(unsigned numLoops = ~0)
-      : FunctionPass(ID), NumLoops(numLoops), RegionToReplay(RegionName),
+      : ModulePass(ID), NumLoops(numLoops), RegionToReplay(RegionName),
         InvocationToReplay(Invocation) {}
 
-  virtual bool runOnFunction(Function &F);
-  bool visitLoop(Loop *L, Module *mod);
-
-  virtual void getAnalysisUsage(AnalysisUsage &AU) const {
-#if LLVM_VERSION_MAJOR > 3
-    AU.addRequired<LoopInfoWrapperPass>();
-    AU.addPreserved<LoopInfoWrapperPass>();
-#else
-    AU.addRequired<LoopInfo>();
-    AU.addPreserved<LoopInfo>();
-#endif
-  }
+  virtual bool runOnModule(Module &M) override;
+  bool runOnFunction(Function &F);
+  bool maybeCreateWrapper(Function &F, Module *mod);
 };
 }
 
 char LoopRegionReplay::ID = 0;
 static RegisterPass<LoopRegionReplay> X("region-replay", "Replay regions");
 
-/**Called on each function int the current Module**/
-bool LoopRegionReplay::runOnFunction(Function &F) {
-  Module *mod = F.getParent();
-
+bool LoopRegionReplay::runOnModule(Module &M) {
   // No main, no instrumentation!
-  Function *Main = mod->getFunction("main");
+  Function *Main = M.getFunction("main");
 
   // Using fortran? ... this kind of works
   if (!Main)
-    Main = mod->getFunction("MAIN__");
+    Main = M.getFunction("MAIN__");
 
   if (Main) { // We are in the module with the main function
     std::string funcName = "real_main";
-    //~ConstantInt* const_int1_11 = ConstantInt::get(mod->getContext(), APInt(1,
+    //~ConstantInt* const_int1_11 = ConstantInt::get(M.getContext(), APInt(1,
     //StringRef("0"), 10)); //false
 
-    Function *mainFunction = mod->getFunction(funcName);
+    Function *mainFunction = M.getFunction(funcName);
     if (!mainFunction) {
       std::vector<Type *> FuncTy_8_args;
       FunctionType *FuncTy_8 = FunctionType::get(
-          /*Result=*/Type::getVoidTy(mod->getContext()),
+          /*Result=*/Type::getVoidTy(M.getContext()),
           /*Params=*/FuncTy_8_args,
           /*isVarArg=*/false);
       Function *mainFunction = Function::Create(
-          FuncTy_8, GlobalValue::ExternalLinkage, funcName, mod);
+          FuncTy_8, GlobalValue::ExternalLinkage, funcName, &M);
       std::vector<Value *> void_16_params;
       CallInst::Create(mainFunction, "", &*Main->begin()->begin());
     }
   }
-#if LLVM_VERSION_MAJOR > 3
-  LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
-#else
-  LoopInfo &LI = getAnalysis<LoopInfo>();
-#endif
-  // Get all loops int the current function and visit them
-  std::vector<Loop *> SubLoops(LI.begin(), LI.end());
-  for (unsigned i = 0, e = SubLoops.size(); i != e; ++i)
-    visitLoop(SubLoops[i], mod);
+
+  std::vector<Function *> preexistingFunctions;
+  for (auto &F : M.functions()) {
+    preexistingFunctions.push_back(&F);
+  }
+  for (auto *F : preexistingFunctions) {
+    runOnFunction(*F);
+  }
   return true;
 }
 
-bool LoopRegionReplay::visitLoop(Loop *L, Module *mod) {
-  // Ensure we are working only on outermost loops
-  if (L->getLoopDepth() > 1)
-    return false;
+/**Called on each function int the current Module**/
+bool LoopRegionReplay::runOnFunction(Function &F) {
+  Module *mod = F.getParent();
+  // Get all loops int the current function and visit them
+  maybeCreateWrapper(F, mod);
+  return true;
+}
 
-  // Get the function we are in
-  Function *currFunc = L->getHeader()->getParent();
-
+bool LoopRegionReplay::maybeCreateWrapper(Function &F, Module *mod) {
   // If we want to replay a particular region, look if it's this one
-  if (RegionToReplay != currFunc->getName()) {
-
+  if (RegionToReplay != F.getName()) {
     return false;
   }
 
   // Create the wrapper function and add a basicBlock in it
-  Function *wrapperFunction = createWrapperFunction(currFunc, mod);
+  Function *wrapperFunction = createWrapperFunction(&F, mod);
   BasicBlock *label_entry =
       BasicBlock::Create(mod->getContext(), "entry", wrapperFunction, 0);
 
@@ -160,7 +149,7 @@ bool LoopRegionReplay::visitLoop(Loop *L, Module *mod) {
 
   // Params for the load function
   std::vector<Value *> loadParams = createLoadFunctionParameters(
-      mod, currFunc, label_entry, InvocationToReplay);
+      mod, &F, label_entry, InvocationToReplay);
 
   // Add call to load
   CallInst::Create(func_load, loadParams, "", label_entry);
@@ -168,10 +157,10 @@ bool LoopRegionReplay::visitLoop(Loop *L, Module *mod) {
   // Ok now we have adresses of variables used by the loop in ptr_vla array,
   // so we have to read it, and create parameters for the loop
   std::vector<Value *> loopParams = createLoopParameters(
-      currFunc, mod, cast<AllocaInst>(loadParams.back()), label_entry);
+      &F, mod, cast<AllocaInst>(loadParams.back()), label_entry);
 
   // Call the function with the extracted loop
-  CallInst::Create(currFunc, loopParams, "", label_entry);
+  CallInst::Create(&F, loopParams, "", label_entry);
 
   // We must add an anti dead code function
   std::vector<Type *> FuncADCE_args;
